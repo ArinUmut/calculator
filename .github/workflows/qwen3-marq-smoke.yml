@@ -8,6 +8,7 @@ on:
 
 jobs:
   smoke:
+    if: github.event_name != 'pull_request' || github.head_ref == 'marq-bench-20260728'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
