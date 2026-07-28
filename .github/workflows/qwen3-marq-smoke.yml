@@ -30,6 +30,7 @@ jobs:
           unzip -q marq-qwen-v0.2.0.zip
           cp -r marq_overlay/marq/. marq-qwen/marq/
           cp -r marq_overlay/tests/. marq-qwen/tests/
+          python marq_overlay/apply_patches.py
       - name: Install
         working-directory: marq-qwen
         run: |
