@@ -27,6 +27,7 @@ jobs:
           unzip -q marq-qwen-v0.2.0.zip
           cp marq_overlay/marq/quantizer.py marq-qwen/marq/quantizer.py
           cp marq_overlay/marq/packing.py marq-qwen/marq/packing.py
+          cp marq_overlay/marq/categorical.py marq-qwen/marq/categorical.py
           cp marq_overlay/tests/test_quantizer.py marq-qwen/tests/test_quantizer.py
       - name: Install
         working-directory: marq-qwen
