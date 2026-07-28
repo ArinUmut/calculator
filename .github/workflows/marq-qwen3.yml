@@ -1,0 +1,128 @@
+name: MARQ Qwen3 benchmark
+
+on:
+  push:
+    branches: ["marq-bench-20260728-v3"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OMP_NUM_THREADS: "3"
+  MKL_NUM_THREADS: "3"
+  TOKENIZERS_PARALLELISM: "false"
+  HF_HUB_DISABLE_XET: "1"
+
+jobs:
+  unit-and-trust-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Reconstruct source
+        run: |
+          cat marq-ci.part-* | base64 -d > marq-qwen-ci.tar.xz
+          echo '2249690953bf6febf5fb378d6654d12419556501d902cc9be408c0ba96283cb3  marq-qwen-ci.tar.xz' | sha256sum -c -
+          tar -xJf marq-qwen-ci.tar.xz
+      - name: Install and test
+        working-directory: marq-qwen
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[qwen,test]'
+          pytest -q
+          python scripts/detect_backend.py | tee backend.json
+      - name: Qwen3 layer-0 trust loop
+        working-directory: marq-qwen
+        run: |
+          python scripts/run_qwen3_experiment.py \
+            --output runs/qwen3-trust-smoke \
+            --model-cache models/qwen3-0.6b \
+            --block-size 32 --calibration-blocks 1 --evaluation-blocks 1 \
+            --rank 8 --oversample 4 --probes 1 --sweeps 1 --scale-cg-iterations 1 \
+            --bits 2 3 4 --target-bpw 3.5 \
+            --include 'model\.layers\.0\.' \
+            --trust-step --true-kl-scale-steps 1 --skip-kquants
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-marq-trust-smoke
+          path: |
+            marq-qwen/runs/qwen3-trust-smoke/results.json
+            marq-qwen/runs/qwen3-trust-smoke/selection-bootstrap.json
+            marq-qwen/runs/qwen3-trust-smoke/marq-export/manifest.json
+            marq-qwen/backend.json
+          if-no-files-found: warn
+
+  full-q0:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Reconstruct and install
+        run: |
+          cat marq-ci.part-* | base64 -d > marq-qwen-ci.tar.xz
+          echo '2249690953bf6febf5fb378d6654d12419556501d902cc9be408c0ba96283cb3  marq-qwen-ci.tar.xz' | sha256sum -c -
+          tar -xJf marq-qwen-ci.tar.xz
+          python -m pip install --upgrade pip
+          python -m pip install -e './marq-qwen[qwen]'
+      - name: Qwen3 all-Linear Q0
+        working-directory: marq-qwen
+        run: |
+          python scripts/run_qwen3_experiment.py \
+            --output runs/qwen3-full-q0 \
+            --model-cache models/qwen3-0.6b \
+            --block-size 32 --calibration-blocks 1 --evaluation-blocks 1 \
+            --rank 8 --oversample 4 --probes 1 --sweeps 1 --scale-cg-iterations 1 \
+            --bits 2 3 4 5 --target-bpw 3.5 --skip-kquants
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-marq-full-q0
+          path: |
+            marq-qwen/runs/qwen3-full-q0/results.json
+            marq-qwen/runs/qwen3-full-q0/selection-bootstrap.json
+            marq-qwen/runs/qwen3-full-q0/marq-export/manifest.json
+          if-no-files-found: warn
+
+  kquants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Reconstruct and install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          cat marq-ci.part-* | base64 -d > marq-qwen-ci.tar.xz
+          echo '2249690953bf6febf5fb378d6654d12419556501d902cc9be408c0ba96283cb3  marq-qwen-ci.tar.xz' | sha256sum -c -
+          tar -xJf marq-qwen-ci.tar.xz
+          python -m pip install --upgrade pip
+          python -m pip install -e './marq-qwen[qwen]'
+      - name: Q2_K through Q5_K_M
+        working-directory: marq-qwen
+        run: |
+          python scripts/run_kquants.py \
+            --output runs/qwen3-kquants \
+            --model-cache models/qwen3-0.6b \
+            --block-size 32 --evaluation-blocks 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-kquants
+          path: marq-qwen/runs/qwen3-kquants/results.json
+          if-no-files-found: warn
