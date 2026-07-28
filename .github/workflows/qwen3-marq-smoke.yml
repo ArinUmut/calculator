@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+concurrency:
+  group: qwen3-marq-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
