@@ -1,0 +1,111 @@
+name: qwen3-kquants
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+concurrency:
+  group: qwen3-kquants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kquants:
+    if: github.event_name != 'pull_request' || github.head_ref == 'marq-kquants-20260728'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OMP_NUM_THREADS: "3"
+      MKL_NUM_THREADS: "3"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake
+          python -m pip install --upgrade pip
+          python -m pip install 'torch>=2.6' 'transformers>=4.51' 'datasets>=3' 'huggingface-hub>=0.30' 'safetensors>=0.4' 'sentencepiece>=0.2' numpy
+      - name: Download pinned model and evaluation corpus
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          from datasets import load_dataset
+          root = Path('kquant-run')
+          root.mkdir(exist_ok=True)
+          snapshot_download(
+              'Qwen/Qwen3-0.6B',
+              revision='c1899de289a04d12100db370d81485cdf75e47ca',
+              local_dir=root / 'model',
+              allow_patterns=['*.json', '*.model', '*.txt', '*.safetensors'],
+          )
+          ds = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split='test')
+          text = '\n'.join(x for x in ds['text'] if x.strip())
+          (root / 'wikitext-test.txt').write_text(text[:80000])
+          PY
+      - name: Build native llama.cpp b9637
+        run: |
+          git clone --depth 1 --branch b9637 https://github.com/ggml-org/llama.cpp.git kquant-run/llama.cpp
+          cmake -S kquant-run/llama.cpp -B kquant-run/llama.cpp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
+          cmake --build kquant-run/llama.cpp/build --config Release -j 3 \
+            --target llama-quantize llama-perplexity llama-bench
+      - name: Convert exact checkpoint
+        run: |
+          python kquant-run/llama.cpp/convert_hf_to_gguf.py kquant-run/model \
+            --outfile kquant-run/qwen3-f16.gguf --outtype f16
+      - name: Quantize and benchmark
+        run: |
+          set -euo pipefail
+          for q in Q2_K Q3_K_M Q4_K_M Q5_K_M; do
+            slug=$(echo "$q" | tr '[:upper:]' '[:lower:]')
+            model="kquant-run/qwen3-${slug}.gguf"
+            kquant-run/llama.cpp/build/bin/llama-quantize kquant-run/qwen3-f16.gguf "$model" "$q"
+            kquant-run/llama.cpp/build/bin/llama-perplexity \
+              -m "$model" -f kquant-run/wikitext-test.txt \
+              -c 256 -b 256 -ub 128 -t 3 > "kquant-run/${slug}-ppl.log" 2>&1
+            kquant-run/llama.cpp/build/bin/llama-bench \
+              -m "$model" -p 128 -n 128 -r 3 -t 3 -o json \
+              > "kquant-run/${slug}-bench.log" 2>&1
+          done
+      - name: Collect results
+        run: |
+          python - <<'PY'
+          import json, platform, re, subprocess
+          from pathlib import Path
+          root = Path('kquant-run')
+          data = {
+              'model_id': 'Qwen/Qwen3-0.6B',
+              'model_revision': 'c1899de289a04d12100db370d81485cdf75e47ca',
+              'llama_cpp_tag': 'b9637',
+              'llama_cpp_commit': subprocess.check_output(['git', '-C', str(root/'llama.cpp'), 'rev-parse', 'HEAD'], text=True).strip(),
+              'platform': platform.platform(),
+              'evaluation_characters': len((root/'wikitext-test.txt').read_text()),
+              'context': 256,
+              'formats': {},
+          }
+          for q in ('Q2_K', 'Q3_K_M', 'Q4_K_M', 'Q5_K_M'):
+              slug = q.lower()
+              ppl_raw = (root/f'{slug}-ppl.log').read_text(errors='replace')
+              bench_raw = (root/f'{slug}-bench.log').read_text(errors='replace')
+              values = re.findall(r'PPL\s*=\s*([0-9]+(?:\.[0-9]+)?)', ppl_raw)
+              data['formats'][q] = {
+                  'bytes': (root/f'qwen3-{slug}.gguf').stat().st_size,
+                  'ppl': float(values[-1]) if values else None,
+                  'ppl_tail': ppl_raw[-4000:],
+                  'bench_raw': bench_raw[-12000:],
+              }
+          (root/'results.json').write_text(json.dumps(data, indent=2, sort_keys=True))
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-kquants
+          path: |
+            kquant-run/results.json
+            kquant-run/*-ppl.log
+            kquant-run/*-bench.log
+          if-no-files-found: warn

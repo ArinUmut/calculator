@@ -1,0 +1,132 @@
+name: qwen3-kquants-fair
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+concurrency:
+  group: qwen3-kquants-fair-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fair:
+    if: github.event_name != 'pull_request' || github.head_ref == 'kquant-fair-20260728'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OMP_NUM_THREADS: "3"
+      MKL_NUM_THREADS: "3"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake
+          python -m pip install --upgrade pip
+          python -m pip install 'torch>=2.6' 'transformers>=4.51' 'datasets>=3' 'huggingface-hub>=0.30' 'safetensors>=0.4' 'sentencepiece>=0.2' numpy
+      - name: Download exact checkpoint and construct shared 4096-token corpus
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          from datasets import load_dataset
+          from transformers import AutoTokenizer
+          root = Path('fair-run')
+          root.mkdir(exist_ok=True)
+          snapshot_download(
+              'Qwen/Qwen3-0.6B',
+              revision='c1899de289a04d12100db370d81485cdf75e47ca',
+              local_dir=root / 'model',
+              allow_patterns=['*.json', '*.model', '*.txt', '*.safetensors'],
+          )
+          tokenizer = AutoTokenizer.from_pretrained(root / 'model', use_fast=True)
+          ds = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split='test')
+          joined = '\n\n'.join(x for x in ds['text'] if x.strip())
+          ids = tokenizer(joined, add_special_tokens=False).input_ids[:4096]
+          decoded = tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+          roundtrip = tokenizer(decoded, add_special_tokens=False).input_ids
+          if roundtrip != ids:
+              raise RuntimeError(f'token roundtrip mismatch: {len(ids)} -> {len(roundtrip)}')
+          (root / 'wikitext-qwen-4096.txt').write_text(decoded)
+          (root / 'corpus.json').write_text(__import__('json').dumps({'tokens': len(ids), 'characters': len(decoded)}, indent=2))
+          PY
+      - name: Build native llama.cpp b9637
+        run: |
+          git clone --depth 1 --branch b9637 https://github.com/ggml-org/llama.cpp.git fair-run/llama.cpp
+          cmake -S fair-run/llama.cpp -B fair-run/llama.cpp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
+          cmake --build fair-run/llama.cpp/build --config Release -j 3 \
+            --target llama-quantize llama-perplexity llama-bench
+      - name: Convert and quantify
+        run: |
+          python fair-run/llama.cpp/convert_hf_to_gguf.py fair-run/model \
+            --outfile fair-run/qwen3-f16.gguf --outtype f16
+          for q in Q2_K Q3_K_M Q4_K_M Q5_K_M; do
+            slug=$(echo "$q" | tr '[:upper:]' '[:lower:]')
+            fair-run/llama.cpp/build/bin/llama-quantize \
+              fair-run/qwen3-f16.gguf fair-run/qwen3-${slug}.gguf "$q"
+          done
+      - name: Perplexity and native throughput
+        run: |
+          set -euo pipefail
+          for spec in F16:qwen3-f16.gguf Q2_K:qwen3-q2_k.gguf Q3_K_M:qwen3-q3_k_m.gguf Q4_K_M:qwen3-q4_k_m.gguf Q5_K_M:qwen3-q5_k_m.gguf; do
+            name=${spec%%:*}; file=${spec#*:}; slug=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+            fair-run/llama.cpp/build/bin/llama-perplexity \
+              -m "fair-run/$file" -f fair-run/wikitext-qwen-4096.txt \
+              -c 128 -b 128 -ub 128 -t 3 > "fair-run/${slug}-ppl.log" 2>&1
+            fair-run/llama.cpp/build/bin/llama-bench \
+              -m "fair-run/$file" -p 128 -n 128 -r 3 -t 3 -o json \
+              > "fair-run/${slug}-bench.log" 2>&1
+          done
+      - name: Collect results
+        run: |
+          python - <<'PY'
+          import json, platform, re, subprocess
+          from pathlib import Path
+          root = Path('fair-run')
+          corpus = json.loads((root/'corpus.json').read_text())
+          files = {
+              'F16': 'qwen3-f16.gguf',
+              'Q2_K': 'qwen3-q2_k.gguf',
+              'Q3_K_M': 'qwen3-q3_k_m.gguf',
+              'Q4_K_M': 'qwen3-q4_k_m.gguf',
+              'Q5_K_M': 'qwen3-q5_k_m.gguf',
+          }
+          result = {
+              'model_id': 'Qwen/Qwen3-0.6B',
+              'model_revision': 'c1899de289a04d12100db370d81485cdf75e47ca',
+              'llama_cpp_tag': 'b9637',
+              'llama_cpp_commit': subprocess.check_output(['git','-C',str(root/'llama.cpp'),'rev-parse','HEAD'], text=True).strip(),
+              'platform': platform.platform(),
+              'context': 128,
+              'threads': 3,
+              'corpus': corpus,
+              'formats': {},
+          }
+          for name, file in files.items():
+              slug = name.lower()
+              ppl_raw = (root/f'{slug}-ppl.log').read_text(errors='replace')
+              bench_raw = (root/f'{slug}-bench.log').read_text(errors='replace')
+              ppls = re.findall(r'PPL\s*=\s*([0-9]+(?:\.[0-9]+)?)', ppl_raw)
+              result['formats'][name] = {
+                  'bytes': (root/file).stat().st_size,
+                  'ppl': float(ppls[-1]) if ppls else None,
+                  'ppl_tail': ppl_raw[-3000:],
+                  'bench_raw': bench_raw[-12000:],
+              }
+          (root/'results.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2, sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-kquants-fair
+          path: |
+            fair-run/results.json
+            fair-run/corpus.json
+            fair-run/*-ppl.log
+            fair-run/*-bench.log
+          if-no-files-found: warn
