@@ -2,6 +2,8 @@ name: qwen3-marq-smoke
 on:
   push:
     branches: ["marq-bench-20260728"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
