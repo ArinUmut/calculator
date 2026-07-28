@@ -1,0 +1,51 @@
+name: qwen3-marq-smoke
+on:
+  push:
+    branches: ["marq-bench-20260728"]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Unpack source
+        run: unzip -q marq-qwen-v0.2.0.zip
+      - name: Install
+        working-directory: marq-qwen
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[qwen,test]'
+      - name: Unit tests
+        working-directory: marq-qwen
+        run: pytest -q
+      - name: Environment
+        working-directory: marq-qwen
+        run: python scripts/detect_backend.py | tee backend.json
+      - name: Qwen3 MARQ smoke
+        working-directory: marq-qwen
+        run: |
+          python scripts/run_qwen3_experiment.py \
+            --output runs/qwen3-smoke \
+            --model-cache models/qwen3-0.6b \
+            --smoke --skip-kquants
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-marq-smoke
+          path: |
+            marq-qwen/runs/qwen3-smoke/results.json
+            marq-qwen/runs/qwen3-smoke/selection-bootstrap.json
+            marq-qwen/runs/qwen3-smoke/marq-export/
+            marq-qwen/backend.json
+          if-no-files-found: warn
