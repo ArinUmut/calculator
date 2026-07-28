@@ -40,12 +40,14 @@ jobs:
       - name: Qwen3 MARQ calibrated evaluation
         working-directory: marq-qwen
         run: |
+          mkdir -p runs/qwen3-eval
+          set -o pipefail
           python scripts/run_qwen3_experiment.py \
             --output runs/qwen3-eval \
             --model-cache models/qwen3-0.6b \
-            --block-size 128 \
-            --calibration-blocks 4 \
-            --evaluation-blocks 32 \
+            --block-size 64 \
+            --calibration-blocks 8 \
+            --evaluation-blocks 64 \
             --probes 2 \
             --rank 16 \
             --oversample 8 \
@@ -53,7 +55,7 @@ jobs:
             --target-bpw 3.5 \
             --sweeps 2 \
             --tau 0.03 \
-            --skip-kquants
+            --skip-kquants 2>&1 | tee runs/qwen3-eval/run.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -62,4 +64,5 @@ jobs:
             marq-qwen/runs/qwen3-eval/results.json
             marq-qwen/runs/qwen3-eval/selection-bootstrap.json
             marq-qwen/runs/qwen3-eval/marq-export/
+            marq-qwen/runs/qwen3-eval/run.log
           if-no-files-found: warn
