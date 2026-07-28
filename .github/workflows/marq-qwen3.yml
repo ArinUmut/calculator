@@ -3,6 +3,8 @@ name: MARQ Qwen3 benchmark
 on:
   push:
     branches: ["marq-bench-20260728-v3"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
