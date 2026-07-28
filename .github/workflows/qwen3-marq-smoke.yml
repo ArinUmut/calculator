@@ -8,11 +8,12 @@ on:
 
 jobs:
   smoke:
+    if: github.event_name != 'pull_request' || github.head_ref == 'marq-bench-20260728'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      OMP_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
       TOKENIZERS_PARALLELISM: "false"
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +25,8 @@ jobs:
           cat marq_chunks/chunk-* | base64 -d > marq-qwen-v0.2.0.zip
           echo "8ac58ae1d89a7421564d1d984022dfcb7aed7a001e8fec95401315ea041400fd  marq-qwen-v0.2.0.zip" | sha256sum -c -
           unzip -q marq-qwen-v0.2.0.zip
+          cp marq_overlay/marq/quantizer.py marq-qwen/marq/quantizer.py
+          cp marq_overlay/tests/test_quantizer.py marq-qwen/tests/test_quantizer.py
       - name: Install
         working-directory: marq-qwen
         run: |
