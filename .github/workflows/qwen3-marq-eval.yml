@@ -1,0 +1,68 @@
+name: qwen3-marq-eval
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+concurrency:
+  group: qwen3-marq-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    if: github.event_name != 'pull_request' || github.head_ref == 'marq-eval-20260728'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Reconstruct and patch source
+        run: |
+          cat marq_chunks/chunk-* | base64 -d > marq-qwen-v0.2.0.zip
+          echo "8ac58ae1d89a7421564d1d984022dfcb7aed7a001e8fec95401315ea041400fd  marq-qwen-v0.2.0.zip" | sha256sum -c -
+          unzip -q marq-qwen-v0.2.0.zip
+          cp -r marq_overlay/marq/. marq-qwen/marq/
+          cp -r marq_overlay/tests/. marq-qwen/tests/
+          python marq_overlay/apply_patches.py
+      - name: Install
+        working-directory: marq-qwen
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[qwen,test]'
+      - name: Unit tests
+        working-directory: marq-qwen
+        run: pytest -q
+      - name: Qwen3 MARQ calibrated evaluation
+        working-directory: marq-qwen
+        run: |
+          mkdir -p runs/qwen3-eval
+          set -o pipefail
+          python scripts/run_qwen3_experiment.py \
+            --output runs/qwen3-eval \
+            --model-cache models/qwen3-0.6b \
+            --block-size 64 \
+            --calibration-blocks 8 \
+            --evaluation-blocks 64 \
+            --probes 2 \
+            --rank 16 \
+            --oversample 8 \
+            --bits 3 4 \
+            --target-bpw 3.5 \
+            --sweeps 2 \
+            --tau 0.03 \
+            --skip-kquants 2>&1 | tee runs/qwen3-eval/run.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen3-marq-eval
+          path: |
+            marq-qwen/runs/qwen3-eval/results.json
+            marq-qwen/runs/qwen3-eval/selection-bootstrap.json
+            marq-qwen/runs/qwen3-eval/marq-export/
+            marq-qwen/runs/qwen3-eval/run.log
+          if-no-files-found: warn
