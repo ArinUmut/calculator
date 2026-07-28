@@ -3,6 +3,9 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+concurrency:
+  group: qwen3-kquants-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   kquants:
@@ -40,7 +43,7 @@ jobs:
           )
           ds = load_dataset('Salesforce/wikitext', 'wikitext-2-raw-v1', split='test')
           text = '\n'.join(x for x in ds['text'] if x.strip())
-          (root / 'wikitext-test.txt').write_text(text[:500000])
+          (root / 'wikitext-test.txt').write_text(text[:80000])
           PY
       - name: Build native llama.cpp b9637
         run: |
@@ -62,7 +65,7 @@ jobs:
             kquant-run/llama.cpp/build/bin/llama-quantize kquant-run/qwen3-f16.gguf "$model" "$q"
             kquant-run/llama.cpp/build/bin/llama-perplexity \
               -m "$model" -f kquant-run/wikitext-test.txt \
-              -c 512 -b 512 -ub 128 -t 3 > "kquant-run/${slug}-ppl.log" 2>&1
+              -c 256 -b 256 -ub 128 -t 3 > "kquant-run/${slug}-ppl.log" 2>&1
             kquant-run/llama.cpp/build/bin/llama-bench \
               -m "$model" -p 128 -n 128 -r 3 -t 3 -o json \
               > "kquant-run/${slug}-bench.log" 2>&1
@@ -79,6 +82,8 @@ jobs:
               'llama_cpp_tag': 'b9637',
               'llama_cpp_commit': subprocess.check_output(['git', '-C', str(root/'llama.cpp'), 'rev-parse', 'HEAD'], text=True).strip(),
               'platform': platform.platform(),
+              'evaluation_characters': len((root/'wikitext-test.txt').read_text()),
+              'context': 256,
               'formats': {},
           }
           for q in ('Q2_K', 'Q3_K_M', 'Q4_K_M', 'Q5_K_M'):
