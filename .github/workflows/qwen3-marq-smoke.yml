@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      HF_HUB_ENABLE_HF_TRANSFER: "1"
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
       TOKENIZERS_PARALLELISM: "false"
@@ -20,8 +19,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Unpack source
-        run: unzip -q marq-qwen-v0.2.0.zip
+      - name: Reconstruct and verify source
+        run: |
+          cat marq_chunks/chunk-* | base64 -d > marq-qwen-v0.2.0.zip
+          echo "8ac58ae1d89a7421564d1d984022dfcb7aed7a001e8fec95401315ea041400fd  marq-qwen-v0.2.0.zip" | sha256sum -c -
+          unzip -q marq-qwen-v0.2.0.zip
       - name: Install
         working-directory: marq-qwen
         run: |
